@@ -1,0 +1,12 @@
+[project]
+name = "gfn-t"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "editdistance>=0.8.1",
+    "numba>=0.61.2",
+    "soundfile>=0.13.1",
+    "speechbrain>=1.0.3",
+]

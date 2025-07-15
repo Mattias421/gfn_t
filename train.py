@@ -172,6 +172,13 @@ class ASR(sb.Brain):
                     tokens, token_lens, tokens_eos, token_eos_lens
                 )
 
+        import editdistance
+        log_r = torch.zeros_like(tokens, dtype=torch.float32)
+        for b, seq in enumerate(tokens):
+            seq_l = int(token_lens[b] * tokens.shape[-1])
+            for t in range(seq_l):
+                log_r[b,t] = - editdistance.eval(seq[:seq_l], seq[:t+1]) / seq_l
+
         if stage == sb.Stage.TRAIN:
             CTC_loss = 0.0
             CE_loss = 0.0
@@ -183,17 +190,11 @@ class ASR(sb.Brain):
                 CE_loss = self.hparams.ce_cost(
                     p_ce, tokens_eos, length=token_eos_lens
                 )
-            import editdistance
-            log_r = torch.zeros_like(tokens, dtype=torch.float32)
-            for b, seq in enumerate(tokens):
-                seq_l = int(token_lens[b] * tokens.shape[-1])
-                for t in range(seq_l):
-                    log_r[b,t] = - editdistance.eval(seq[:seq_l], seq[:t+1]) / seq_l
 
             loss_transducer = self.hparams.transducer_cost(
                 logits_transducer, tokens, log_r, wav_lens, token_lens
             )
-            breakpoint()
+            print(loss_transducer)
             loss = (
                 self.hparams.ctc_weight * CTC_loss
                 + self.hparams.ce_weight * CE_loss
@@ -202,7 +203,7 @@ class ASR(sb.Brain):
             )
         else:
             loss = self.hparams.transducer_cost(
-                logits_transducer, tokens, wav_lens, token_lens
+                logits_transducer, tokens, log_r, wav_lens, token_lens
             )
 
         if stage != sb.Stage.TRAIN:
@@ -261,6 +262,11 @@ class ASR(sb.Brain):
                 min_keys=["WER"],
                 num_to_keep=self.hparams.avg_checkpoints,
             )
+
+            if if_main_process():
+                file = Path(self.hparams.output_folder) / f"valid_wer_{epoch}.txt"
+                with open(file, "w", encoding="utf-8") as w:
+                    self.hparams.wer_metric.write_stats(w)
 
         elif stage == sb.Stage.TEST:
             self.hparams.train_logger.log_stats(

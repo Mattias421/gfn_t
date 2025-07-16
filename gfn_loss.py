@@ -56,6 +56,7 @@ except ImportError:
 
 
 
+
 @cuda.jit()
 def cu_kernel_forward(log_probs, labels, alpha, log_p, log_r, T, U, blank, lock):
     """
@@ -198,7 +199,110 @@ def cu_kernel_compute_grad(log_probs, labels, alpha, grads, T, U, blank):
                     grads[b, t, u, l] + log_probs[b, t, u, l] - beta[b, 0, 0]
                 )
 
+@cuda.jit()
+def cu_kernel_forward_only(log_probs, labels, alpha, log_p, log_r, T, U, blank, lock):
+    """
+    Compute forward pass for the forward-backward algorithm using Numba cuda kernel.
+    Sequence Transduction with naive implementation : https://arxiv.org/pdf/1211.3711.pdf
 
+    Arguments
+    ---------
+    log_probs : torch.Tensor
+        4D Tensor of (batch x TimeLength x LabelLength x outputDim) from the Transducer network.
+    labels : torch.Tensor
+        2D Tensor of (batch x MaxSeqLabelLength) containing targets of the batch with zero padding.
+    alpha : torch.Tensor
+        3D Tensor of (batch x TimeLength x LabelLength) for forward computation.
+    log_p : torch.Tensor
+        1D Tensor of (batch) for forward cost computation.
+    T : torch.Tensor
+        1D Tensor of (batch) containing TimeLength of each target.
+    U : torch.Tensor
+        1D Tensor of (batch) containing LabelLength of each target.
+    blank : int
+        Blank index.
+    lock : torch.Tensor
+        2D Tensor of (batch x LabelLength) containing bool(1-0) lock for parallel computation.
+    """
+
+    # parallelize the forward algorithm over batch and target length dim
+    b = cuda.blockIdx.x
+    u = cuda.threadIdx.x
+    t = 0
+    if u <= U[b]:
+        # for each (B,U) Thread
+        # wait the unlock of the previous computation of Alpha[b,U-1,:]
+        # Do the computation over the whole Time sequence on alpha[B,U,:]
+        # and then unlock the target U+1 for computation
+        while t < T[b]:
+            if u == 0:
+                if t > 0:
+                    alpha[b, t, 0] = (
+                        alpha[b, t - 1, 0] + log_probs[b, t - 1, 0, blank]
+                    )
+                cuda.atomic.add(lock, (b, u + 1), -1)
+                t += 1
+            else:
+                if cuda.atomic.add(lock, (b, u), 0) < 0:
+                    if t == 0:
+                        alpha[b, 0, u] = (
+                            alpha[b, 0, u - 1]
+                            + log_probs[b, 0, u - 1, labels[b, u - 1]]
+                        )
+                    else:
+                        # compute emission prob
+                        emit = (
+                            alpha[b, t, u - 1]
+                            + log_probs[b, t, u - 1, labels[b, u - 1]]
+                        )
+                        # compute no_emission prob
+                        no_emit = (
+                            alpha[b, t - 1, u] + log_probs[b, t - 1, u, blank]
+                        )
+                        # do logsumexp between log_emit and log_no_emit
+                        alpha[b, t, u] = max(no_emit, emit) + math.log1p(
+                            math.exp(-abs(no_emit - emit))
+                        )
+                    if u < U[b]:
+                        cuda.atomic.add(lock, (b, u + 1), -1)
+                    cuda.atomic.add(lock, (b, u), 1)
+                    t += 1
+
+        # save probability of T column
+        log_p[b,u] = (
+            alpha[b, T[b] - 1, u] + log_probs[b, T[b] - 1, u, blank]
+        ) / T[b]
+
+
+class ComputeMarginalProb(Function):
+
+    @staticmethod
+    def forward(ctx, log_probs, labels, log_r, T, U, blank, reduction):
+        log_probs = log_probs.detach()
+        B, maxT, maxU, A = log_probs.shape
+        grads = torch.zeros(
+            (B, maxT, maxU, A), dtype=log_probs.dtype, device=log_probs.device
+        )
+        alpha = torch.zeros(
+            (B, maxT, maxU), device=log_probs.device, dtype=log_probs.dtype
+        )
+        lock = torch.zeros(
+            (B, maxU), dtype=torch.int32, device=log_probs.device
+        )
+        log_p_alpha = torch.zeros(
+            (B,maxU), device=log_probs.device, dtype=log_probs.dtype
+        )
+        cu_kernel_forward_only[B, maxU](
+            log_probs, labels, alpha, log_p_alpha, log_r, T, U, blank, lock
+        )
+
+        cuda.synchronize()
+        return log_p_alpha
+
+    @staticmethod
+    def backward(ctx, grad):
+        breakpoint()
+        return None
 
 
 class Transducer(Function):
@@ -392,7 +496,7 @@ def transducer_loss(
             log_probs, targets, log_r, input_lens, target_lens, blank_index, reduction
         )
 
-def gfn_loss_naiive(
+def gfn_loss(
     logits,
     targets,
     log_r,
@@ -427,113 +531,25 @@ def gfn_loss_naiive(
     The computed transducer loss.
     """
 
-    T = (input_lens * logits.shape[1]).round().int()
-    U = (target_lens * targets.shape[1]).round().int()
+    input_lens = (input_lens * logits.shape[1]).round().int()
+    target_lens = (target_lens * targets.shape[1]).round().int()
 
-    # forward algorithm from https://github.com/lorenlugosch/transducer-tutorial/blob/main/transducer_tutorial_example.ipynb
+    # Transducer.apply function take log_probs tensor.
+    log_probs = logits.log_softmax(-1)
+    log_p = ComputeMarginalProb.apply(
+        log_probs, targets, log_r, input_lens, target_lens, blank_index, reduction
+    )
+    B = log_p.shape[0]
 
-    B = logits.shape[0]
-    T_max = logits.shape[1]
-    U_max = logits.shape[2] - 1
-    log_alpha = torch.zeros(B, T_max, U_max+1, device=logits.device)
-    for t in range(T_max):
-      for u in range(U_max+1):
-          if u == 0:
-            if t == 0:
-              log_alpha[:, t, u] = 0.
-
-            else: #t > 0
-              log_alpha[:, t, u] = log_alpha[:, t-1, u] + logits[:, t-1, 0, blank_index] 
-                  
-          else: #u > 0
-            if t == 0:
-              log_alpha[:, t, u] = log_alpha[:, t,u-1] + torch.gather(logits[:, t, u-1], dim=1, index=targets[:,u-1].view(-1,1) ).reshape(-1)
-            
-            else: #t > 0
-              log_alpha[:, t, u] = torch.logsumexp(torch.stack([
-                  log_alpha[:, t-1, u] + logits[:, t-1, u, blank_index],
-                  log_alpha[:, t, u-1] + torch.gather(logits[:, t, u-1], dim=1, index=targets[:,u-1].view(-1,1) ).reshape(-1)
-              ]), dim=0)
-    
-    loss_batch = torch.zeros(B, device=logits.device)
-
+    loss_batch = torch.zeros((B,))
     for b in range(B):
-        for m in range(0, U[b]-1):
-            for n  in range(m, U[b]):
-                log_prob_m = log_alpha[b, T[b]-1, m] + logits[b, T[b]-1, m, blank_index]
-                log_prob_n = log_alpha[b, T[b]-1, n] + logits[b, T[b]-1, n, blank_index]
+        for m in range(0,target_lens[b]-1):
+            for n in range(m+1,target_lens[b]):
 
-                loss_batch[b] = loss_batch[b] + ((log_r[b,m] - log_r[b,n]) + 2 * (log_prob_n - log_prob_m)) ** 2
+                # R_m + P_n
+                sub_tb_loss = (log_r[b, m] - log_r[b, n]) + 2 * (log_p[b,n] - log_p[b,m])
 
-    loss = loss_batch.mean()
-
-    return loss
-
-def gfn_loss(
-    logits, targets, input_lens, target_lens, log_r, blank_index
-):
-    # =========================================================================
-    # Part 1: Alpha Calculation (Still a bottleneck)
-    # This part remains the same but is a candidate for CUDA optimization.
-    # =========================================================================
-    
-    T_max = logits.shape[1]
-    # Assuming targets is padded, U is the actual length per item
-    U = (target_lens * targets.shape[1]).round().int() 
-    B = logits.shape[0]
-    U_max = logits.shape[2] - 1
-    
-    log_alpha = torch.zeros(B, T_max, U_max + 1, device=logits.device)
-    
-    # This double loop is slow and should be moved to a CUDA kernel for best performance
-    for t in range(T_max):
-        for u in range(U_max + 1):
-            if u == 0:
-                if t == 0:
-                    log_alpha[:, t, u] = 0.
-                else: # t > 0
-                    log_alpha[:, t, u] = log_alpha[:, t-1, u] + logits[:, t-1, 0, blank_index]
-            else: # u > 0
-                if t == 0:
-                    log_alpha[:, t, u] = log_alpha[:, t,u-1] + torch.gather(logits[:, t, u-1], dim=1, index=targets[:,u-1].view(-1,1) ).reshape(-1)
-                else: # t > 0
-                    log_alpha[:, t, u] = torch.logsumexp(torch.stack([
-                      log_alpha[:, t-1, u] + logits[:, t-1, u, blank_index],
-                      log_alpha[:, t, u-1] + torch.gather(logits[:, t, u-1], dim=1, index=targets[:,u-1].view(-1,1) ).reshape(-1)
-                    ]), dim=0)
-
-    # =========================================================================
-    # Part 2: Vectorized Loss Calculation (The Main Optimization)
-    # =========================================================================
-    loss_batch = torch.zeros(B, device=logits.device)
-
-    # We still loop over the batch, but the expensive U*U loop is gone.
-    for b in range(B):
-        Ub = U[b]
-        Tb = (input_lens[b] * logits.shape[1]).round().int()
-
-        if Ub <= 1: # Cannot compute pairwise loss for sequences of length 0 or 1
-            continue
-
-        # Step 1: Extract the final path log-probabilities for this batch item
-        # Shape: [Ub]
-        log_prob_all = log_alpha[b, Tb - 1, :Ub] + logits[b, Tb - 1, :Ub, blank_index]
-        
-        # Also extract the corresponding R values
-        # Shape: [Ub]
-        log_r_b = log_r[b]
-        
-        # Step 2 & 3: Use broadcasting to create difference matrices
-        # Shape of both diff_prob and diff_r: [Ub, Ub]
-        diff_prob = log_prob_all.unsqueeze(0) - log_prob_all.unsqueeze(1)
-        diff_r = log_r_b - log_r_b # Note the swapped order for R(m) - R(n)
-        
-        # Step 4 & 5: Calculate all pairwise losses and create a mask for the upper triangle
-        all_pairwise_losses = (diff_r + 2 * diff_prob) ** 2
-        mask = torch.triu(torch.ones(Ub, Ub, device=logits.device), diagonal=1).bool()
-        
-        # Step 6: Apply the mask and sum to get the final loss for this item
-        loss_batch[b] = torch.sum(all_pairwise_losses[mask])
+                loss_batch[b] = loss_batch[b] + (sub_tb_loss ** 2) # add squared loss
+    breakpoint()
 
     return loss_batch.mean()
-

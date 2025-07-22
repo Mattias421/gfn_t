@@ -75,7 +75,7 @@ class ASR(sb.core.Brain):
         # forward modules
         src = self.modules.CNN(feats)
 
-        enc_out, pred = self.modules.Transformer(
+        enc_out, transformer_out = self.modules.Transformer(
             src, tokens_bos, wav_lens, pad_idx=self.hparams.pad_index
         )
 
@@ -83,9 +83,11 @@ class ASR(sb.core.Brain):
         logits = self.modules.ctc_lin(enc_out)
         p_ctc = self.hparams.log_softmax(logits)
 
+
         # output layer for seq2seq log-probabilities
-        pred = self.modules.seq_lin(pred)
+        pred = self.modules.seq_lin(transformer_out)
         p_seq = self.hparams.softmax(pred)
+
 
         # Compute outputs
         hyps = None
@@ -110,12 +112,12 @@ class ASR(sb.core.Brain):
                     enc_out.detach(), wav_lens
                 )
 
-        return p_ctc, p_seq, wav_lens, hyps
+        return p_ctc, p_seq, transformer_out, wav_lens, hyps
 
     def compute_objectives(self, predictions, batch, stage):
         """Computes the loss (CTC+NLL) given predictions and targets."""
 
-        (p_ctc, p_seq, wav_lens, hyps) = predictions
+        (p_ctc, p_seq, transformer_out, wav_lens, hyps) = predictions
 
         ids = batch.id
         tokens_eos, tokens_eos_lens = batch.tokens_eos
@@ -144,25 +146,38 @@ class ASR(sb.core.Brain):
         import torch.nn.functional as F
         from speechbrain.lobes.models.transformer.Transformer import get_mask_from_lengths
 
-        q_values = F.one_hot(tokens_eos, num_classes=self.hparams.output_neurons)
-        seq_mask = ~get_mask_from_lengths(tokens_eos_lens * tokens_eos.shape[-1])
-        q_values = q_values * seq_mask[:, :, None]
-        p_seq = p_seq * seq_mask[:, :, None]
+        # critic loss
+        B, U, N = p_seq.shape
+        seq_mask = ~get_mask_from_lengths(tokens_eos_lens * U, max_len=U) # Assuming lens are normalized
+        reward = torch.ones((B, U), device=self.device)
+        reward = reward * seq_mask
+        reward[:,0] = 0
 
-        eps = p_seq == 0.0
-        eps = eps.float() * 1e-8
+        eps = 1e-8
         log_p_seq = torch.log(p_seq + eps)
-        inside_term = self.hparams.alpha_temperature * log_p_seq - q_values.to(self.device)
-        loss_seq = (p_seq * inside_term).sum(dim=1).mean() # TODO how best to reduce?
 
-        loss_ctc = self.hparams.ctc_cost(
-            p_ctc, tokens, wav_lens, tokens_lens
-        ).sum()
+        with torch.no_grad():
+            qf1_next_target = self.modules.target_network_1(transformer_out)
+            qf2_next_target = self.modules.target_network_2(transformer_out)
+            min_qf_next_target = p_seq * (torch.min(qf1_next_target, qf2_next_target) - self.hparams.alpha_temperature * log_p_seq)
+            min_qf_next_target = min_qf_next_target.sum(dim=-1) * seq_mask
+            next_q_value = reward + min_qf_next_target
 
-        loss = (
-            self.hparams.ctc_weight * loss_ctc
-            + (1 - self.hparams.ctc_weight) * loss_seq
-        )
+        qf1_pi = self.modules.q_network_1(transformer_out)
+        qf2_pi = self.modules.q_network_2(transformer_out)        
+        qf1 = qf1_pi.gather(dim=2,index=tokens_eos[:,:,None]).squeeze()
+        qf2 = qf2_pi.gather(dim=2,index=tokens_eos[:,:,None]).squeeze()
+
+        qf1_loss = F.mse_loss(qf1, next_q_value)
+        qf2_loss = F.mse_loss(qf2, next_q_value)
+
+        # actor loss
+        min_qf_pi = torch.min(qf1_pi, qf2_pi)
+        inside_term = self.hparams.alpha_temperature * log_p_seq - min_qf_pi
+        policy_loss = (p_seq * inside_term).sum(dim=2) * seq_mask
+        policy_loss = policy_loss.sum() / (tokens_eos_lens.sum() * U)
+
+        loss_ctc = self.hparams.ctc_cost(p_ctc, tokens, wav_lens, tokens_lens).sum()
 
         if stage != sb.Stage.TRAIN:
             current_epoch = self.hparams.epoch_counter.current
@@ -179,7 +194,68 @@ class ASR(sb.core.Brain):
 
             # compute the accuracy of the one-step-forward prediction
             self.acc_metric.append(p_seq, tokens_eos, tokens_eos_lens)
-        return loss
+
+        self.losses = (policy_loss, qf1_loss, qf2_loss)
+
+        return policy_loss
+
+    def fit_batch(self, batch):
+        """Fit one batch, override to do multiple updates.
+
+        The default implementation depends on a few methods being defined
+        with a particular behavior:
+
+        * ``compute_forward()``
+        * ``compute_objectives()``
+        * ``optimizers_step()``
+
+        Also depends on having optimizers passed at initialization.
+
+        Arguments
+        ---------
+        batch : list of torch.Tensors
+            Batch of data to use for training. Default implementation assumes
+            this batch has two elements: inputs and targets.
+
+        Returns
+        -------
+        detached loss
+        """
+        should_step = (self.step % self.grad_accumulation_factor) == 0
+        self.on_fit_batch_start(batch, should_step)
+
+        with self.no_sync(not should_step):
+            with self.training_ctx:
+                outputs = self.compute_forward(batch, sb.Stage.TRAIN)
+                loss = self.compute_objectives(outputs, batch, sb.Stage.TRAIN)
+                policy_loss, qf1_loss, qf2_loss = self.losses
+
+            # policy
+            scaled_policy_loss = self.scaler.scale(
+                policy_loss / self.grad_accumulation_factor
+            )
+            self.check_loss_isfinite(scaled_policy_loss)
+            scaled_policy_loss.backward()
+
+            # qf1
+            scaled_qf1_loss = self.scaler.scale(
+                qf1_loss / self.grad_accumulation_factor
+            )
+            self.check_loss_isfinite(scaled_qf1_loss)
+            scaled_qf1_loss.backward()
+
+            # qf2
+            scaled_qf2_loss = self.scaler.scale(
+                qf2_loss / self.grad_accumulation_factor
+            )
+            self.check_loss_isfinite(scaled_qf2_loss)
+            scaled_qf2_loss.backward()
+
+        if should_step:
+            self.optimizers_step()
+
+        self.on_fit_batch_end(batch, outputs, loss, should_step)
+        return loss.detach().cpu()
 
     def on_evaluate_start(self, max_key=None, min_key=None):
         """perform checkpoint average if needed"""

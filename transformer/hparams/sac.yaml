@@ -61,6 +61,7 @@ eval_precision: fp16
 # stages related parameters
 lr_adam: 0.01
 alpha_temperature: 0.1
+polyak_interpolation_factor: 0.99
 
 # Feature parameters
 sample_rate: 16000
@@ -189,6 +190,22 @@ seq_lin: !new:speechbrain.nnet.linear.Linear
     input_size: !ref <d_model>
     n_neurons: !ref <output_neurons>
 
+q_network_1: !new:speechbrain.nnet.linear.Linear
+    input_size: !ref <d_model>
+    n_neurons: !ref <output_neurons>
+
+q_network_2: !new:speechbrain.nnet.linear.Linear
+    input_size: !ref <d_model>
+    n_neurons: !ref <output_neurons>
+
+target_network_1: !new:speechbrain.nnet.linear.Linear
+    input_size: !ref <d_model>
+    n_neurons: !ref <output_neurons>
+
+target_network_2: !new:speechbrain.nnet.linear.Linear
+    input_size: !ref <d_model>
+    n_neurons: !ref <output_neurons>
+
 normalize: !new:speechbrain.processing.features.InputNormalization
     norm_type: global
     update_until_epoch: 4
@@ -199,9 +216,13 @@ modules:
     seq_lin: !ref <seq_lin>
     ctc_lin: !ref <ctc_lin>
     normalize: !ref <normalize>
+    q_network_1: !ref <q_network_1>
+    q_network_2: !ref <q_network_2>
+    target_network_1: !ref <target_network_1>
+    target_network_2: !ref <target_network_2>
 
 model: !new:torch.nn.ModuleList
-    - [!ref <CNN>, !ref <Transformer>, !ref <seq_lin>, !ref <ctc_lin>]
+    - [!ref <CNN>, !ref <Transformer>, !ref <seq_lin>, !ref <ctc_lin>, !ref <q_network_1>, !ref <q_network_2>, !ref <target_network_1>, !ref <target_network_2>]
 
 # define two optimizers here for two-stage training
 Adam: !name:torch.optim.Adam

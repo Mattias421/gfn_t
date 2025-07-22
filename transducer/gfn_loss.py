@@ -199,179 +199,6 @@ def cu_kernel_compute_grad(log_probs, labels, alpha, grads, T, U, blank):
                     grads[b, t, u, l] + log_probs[b, t, u, l] - beta[b, 0, 0]
                 )
 
-@cuda.jit()
-def cu_kernel_forward_only(log_probs, labels, alpha, log_p, log_r, T, U, blank, lock):
-    """
-    Compute forward pass for the forward-backward algorithm using Numba cuda kernel.
-    Sequence Transduction with naive implementation : https://arxiv.org/pdf/1211.3711.pdf
-
-    Arguments
-    ---------
-    log_probs : torch.Tensor
-        4D Tensor of (batch x TimeLength x LabelLength x outputDim) from the Transducer network.
-    labels : torch.Tensor
-        2D Tensor of (batch x MaxSeqLabelLength) containing targets of the batch with zero padding.
-    alpha : torch.Tensor
-        3D Tensor of (batch x TimeLength x LabelLength) for forward computation.
-    log_p : torch.Tensor
-        1D Tensor of (batch) for forward cost computation.
-    T : torch.Tensor
-        1D Tensor of (batch) containing TimeLength of each target.
-    U : torch.Tensor
-        1D Tensor of (batch) containing LabelLength of each target.
-    blank : int
-        Blank index.
-    lock : torch.Tensor
-        2D Tensor of (batch x LabelLength) containing bool(1-0) lock for parallel computation.
-    """
-
-    # parallelize the forward algorithm over batch and target length dim
-    b = cuda.blockIdx.x
-    u = cuda.threadIdx.x
-    t = 0
-    if u <= U[b]:
-        # for each (B,U) Thread
-        # wait the unlock of the previous computation of Alpha[b,U-1,:]
-        # Do the computation over the whole Time sequence on alpha[B,U,:]
-        # and then unlock the target U+1 for computation
-        while t < T[b]:
-            if u == 0:
-                if t > 0:
-                    alpha[b, t, 0] = (
-                        alpha[b, t - 1, 0] + log_probs[b, t - 1, 0, blank]
-                    )
-                cuda.atomic.add(lock, (b, u + 1), -1)
-                t += 1
-            else:
-                if cuda.atomic.add(lock, (b, u), 0) < 0:
-                    if t == 0:
-                        alpha[b, 0, u] = (
-                            alpha[b, 0, u - 1]
-                            + log_probs[b, 0, u - 1, labels[b, u - 1]]
-                        )
-                    else:
-                        # compute emission prob
-                        emit = (
-                            alpha[b, t, u - 1]
-                            + log_probs[b, t, u - 1, labels[b, u - 1]]
-                        )
-                        # compute no_emission prob
-                        no_emit = (
-                            alpha[b, t - 1, u] + log_probs[b, t - 1, u, blank]
-                        )
-                        # do logsumexp between log_emit and log_no_emit
-                        alpha[b, t, u] = max(no_emit, emit) + math.log1p(
-                            math.exp(-abs(no_emit - emit))
-                        )
-                    if u < U[b]:
-                        cuda.atomic.add(lock, (b, u + 1), -1)
-                    cuda.atomic.add(lock, (b, u), 1)
-                    t += 1
-
-        # save probability of T column, and normalize by T
-        log_p[b,u] = (
-            alpha[b, T[b] - 1, u] + log_probs[b, T[b] - 1, u, blank]
-        ) / T[b]
-
-@cuda.jit()
-def cu_kernel_forward_only_grad(d_log_probs, labels, d_alpha, d_log_p, emit, no_emit, T, U, blank, lock):
-    """
-    Compute forward pass for the forward-backward algorithm using Numba cuda kernel.
-    Sequence Transduction with naive implementation : https://arxiv.org/pdf/1211.3711.pdf
-
-    Arguments
-    ---------
-    log_probs : torch.Tensor
-        4D Tensor of (batch x TimeLength x LabelLength x outputDim) from the Transducer network.
-    labels : torch.Tensor
-        2D Tensor of (batch x MaxSeqLabelLength) containing targets of the batch with zero padding.
-    alpha : torch.Tensor
-        3D Tensor of (batch x TimeLength x LabelLength) for forward computation.
-    log_p : torch.Tensor
-        1D Tensor of (batch) for forward cost computation.
-    T : torch.Tensor
-        1D Tensor of (batch) containing TimeLength of each target.
-    U : torch.Tensor
-        1D Tensor of (batch) containing LabelLength of each target.
-    blank : int
-        Blank index.
-    lock : torch.Tensor
-        2D Tensor of (batch x LabelLength) containing bool(1-0) lock for parallel computation.
-    """
-
-    # parallelize the forward algorithm over batch and target length dim
-    b = cuda.blockIdx.x
-    u = cuda.threadIdx.x
-    t = T[b]
-    if u <= U[b]:
-        # for each (B,U) Thread
-        # wait the unlock of the previous computation of Alpha[b,U-1,:]
-        # Do the computation over the whole Time sequence on alpha[B,U,:]
-        # and then unlock the target U+1 for computation
-        while t > 0:
-            if u == 0 and cuda.atomic.add(lock, (b, 0), -1):
-                if t > 0:
-                    d_alpha[b,t-1,0] += d_alpha[b, t,0]
-                    d_log_probs[b, t - 1, 0, blank] += d_alpha[b,t,0]
-                t -= 1
-
-            else:
-                if cuda.atomic.add(lock, (b, u), 0) < 0:
-
-                    if t == T[b]:
-                        d_alpha[b,t-1,u] += d_log_p[b,u] / T[b]
-                        d_log_probs[b,t-1,u] += d_log_p[b,u] / T[b]
-
-                    else:
-                        norm = math.exp(emit[b,t,u]) + math.exp(no_emit[b,t,u])
-                        d_emit = d_alpha[b,t,u] * (math.exp(emit[b,t,u]) / norm)
-                        d_no_emit = d_alpha[b,t,u] * (math.exp(no_emit[b,t,u]) / norm)
-
-                        d_alpha[b,t,u-1] += d_emit
-                        d_alpha[b,t-1,u] += d_no_emit
-
-                        d_log_probs[b,t,u-1, labels[b,u-1]] += d_emit
-                        d_log_probs[b,t-1,u,blank] += d_no_emit
-
-                        if u < U[b]:
-                            cuda.atomic.add(lock, (b, u - 1), -1)
-                        cuda.atomic.add(lock, (b, u), 1)
-                        t -= 1
-
-
-
-
-
-
-
-
-class ComputeMarginalProb(Function):
-
-    @staticmethod
-    def forward(ctx, log_probs, labels, log_r, T, U, blank, reduction):
-        log_probs = log_probs.detach()
-        B, maxT, maxU, A = log_probs.shape
-
-        alpha = torch.zeros(
-            (B, maxT, maxU), device=log_probs.device, dtype=log_probs.dtype
-        )
-        lock = torch.zeros(
-            (B, maxU), dtype=torch.int32, device=log_probs.device
-        )
-        log_p_alpha = torch.zeros(
-            (B,maxU), device=log_probs.device, dtype=log_probs.dtype
-        )
-        cu_kernel_forward_only[B, maxU](
-            log_probs, labels, alpha, log_p_alpha, log_r, T, U, blank, lock
-        )
-
-        cuda.synchronize()
-        return log_p_alpha
-
-    @staticmethod
-    def backward(ctx, grad):
-        breakpoint()
-        return None
 
 
 class Transducer(Function):
@@ -565,6 +392,224 @@ def transducer_loss(
             log_probs, targets, log_r, input_lens, target_lens, blank_index, reduction
         )
 
+@cuda.jit()
+def cu_kernel_forward_only(log_probs, labels, alpha, log_p, log_r, emit, no_emit, T, U, blank, lock):
+    """
+    Compute forward pass for the forward-backward algorithm using Numba cuda kernel.
+    Sequence Transduction with naive implementation : https://arxiv.org/pdf/1211.3711.pdf
+
+    Arguments
+    ---------
+    log_probs : torch.Tensor
+        4D Tensor of (batch x TimeLength x LabelLength x outputDim) from the Transducer network.
+    labels : torch.Tensor
+        2D Tensor of (batch x MaxSeqLabelLength) containing targets of the batch with zero padding.
+    alpha : torch.Tensor
+        3D Tensor of (batch x TimeLength x LabelLength) for forward computation.
+    log_p : torch.Tensor
+        1D Tensor of (batch) for forward cost computation.
+    T : torch.Tensor
+        1D Tensor of (batch) containing TimeLength of each target.
+    U : torch.Tensor
+        1D Tensor of (batch) containing LabelLength of each target.
+    blank : int
+        Blank index.
+    lock : torch.Tensor
+        2D Tensor of (batch x LabelLength) containing bool(1-0) lock for parallel computation.
+    """
+
+    # parallelize the forward algorithm over batch and target length dim
+    b = cuda.blockIdx.x
+    u = cuda.threadIdx.x
+    t = 0
+    if u <= U[b]:
+        # for each (B,U) Thread
+        # wait the unlock of the previous computation of Alpha[b,U-1,:]
+        # Do the computation over the whole Time sequence on alpha[B,U,:]
+        # and then unlock the target U+1 for computation
+        while t < T[b]:
+            if u == 0:
+                if t > 0:
+                    alpha[b, t, 0] = (
+                        alpha[b, t - 1, 0] + log_probs[b, t - 1, 0, blank]
+                    )
+                cuda.atomic.add(lock, (b, u + 1), -1)
+                t += 1
+            else:
+                if cuda.atomic.add(lock, (b, u), 0) < 0:
+                    if t == 0:
+                        alpha[b, 0, u] = (
+                            alpha[b, 0, u - 1]
+                            + log_probs[b, 0, u - 1, labels[b, u - 1]]
+                        )
+                    else:
+                        # compute emission prob
+                        emit[b,t,u] = (
+                            alpha[b, t, u - 1]
+                            + log_probs[b, t, u - 1, labels[b, u - 1]]
+                        )
+                        # compute no_emission prob
+                        no_emit[b,t,u] = (
+                            alpha[b, t - 1, u] + log_probs[b, t - 1, u, blank]
+                        )
+                        # do logsumexp between log_emit and log_no_emit
+                        alpha[b, t, u] = max(no_emit[b,t,u], emit[b,t,u]) + math.log1p(
+                            math.exp(-abs(no_emit[b,t,u] - emit[b,t,u]))
+                        )
+                    if u < U[b]:
+                        cuda.atomic.add(lock, (b, u + 1), -1)
+                    cuda.atomic.add(lock, (b, u), 1)
+                    t += 1
+
+        # save probability of T column, and normalize by T
+        log_p[b,u] = (
+            alpha[b, T[b] - 1, u] + log_probs[b, T[b] - 1, u, blank]
+        ) / T[b]
+
+@cuda.jit()
+def cu_kernel_forward_only_grad(d_log_p, d_log_probs, labels, d_alpha, emit, no_emit, T, U, blank, lock):
+    """
+    Compute forward pass for the forward-backward algorithm using Numba cuda kernel.
+    Sequence Transduction with naive implementation : https://arxiv.org/pdf/1211.3711.pdf
+
+    Arguments
+    ---------
+    log_probs : torch.Tensor
+        4D Tensor of (batch x TimeLength x LabelLength x outputDim) from the Transducer network.
+    labels : torch.Tensor
+        2D Tensor of (batch x MaxSeqLabelLength) containing targets of the batch with zero padding.
+    alpha : torch.Tensor
+        3D Tensor of (batch x TimeLength x LabelLength) for forward computation.
+    log_p : torch.Tensor
+        1D Tensor of (batch) for forward cost computation.
+    T : torch.Tensor
+        1D Tensor of (batch) containing TimeLength of each target.
+    U : torch.Tensor
+        1D Tensor of (batch) containing LabelLength of each target.
+    blank : int
+        Blank index.
+    lock : torch.Tensor
+        2D Tensor of (batch x LabelLength) containing bool(1-0) lock for parallel computation.
+    """
+
+    # parallelize the forward algorithm over batch and target length dim
+    b = cuda.blockIdx.x
+    u = cuda.threadIdx.x
+    t = T[b] - 1
+
+    if u <= U[b]:
+        # for each (B,U) Thread
+        # wait the unlock of the previous computation of Alpha[b,U+1,:]
+        # Do the computation over the whole Time sequence on alpha[B,U,:]
+        # and then unlock the target U-1 for computation
+        if u == U[b] and cuda.atomic.add(lock, (b,u),0) == 0:
+            # unlock top row
+            cuda.atomic.add(lock, (b, u), -1)
+
+        while t > 0:
+
+            if u == 0 and cuda.atomic.add(lock, (b, 0), 0) < 0:
+                if t > 0:
+                    cuda.atomic.add(d_alpha, (b,t-1,0), d_alpha[b,t,0])
+                    cuda.atomic.add(d_log_probs, (b,t-1,0,blank), d_alpha[b,t,0])
+                t -= 1
+                cuda.atomic.add(lock, (b, U[b]), -1)
+                cuda.atomic.add(lock, (b, u), 1)
+
+            else:
+                if cuda.atomic.add(lock, (b, u), 0) < 0:
+
+                    if t == T[b] - 1:
+                        cuda.atomic.add(d_alpha, (b,t-1,u), d_log_p[b,u] / T[b])
+                        cuda.atomic.add(d_log_probs, (b,t-1,u,blank), d_log_p[b,u] / T[b])
+
+                    max_val = max(emit[b,t,u], no_emit[b,t,u])
+                    exp_emit = math.exp(emit[b,t,u] - max_val)
+                    exp_no_emit = math.exp(no_emit[b,t,u] - max_val)
+                    norm =  exp_emit + exp_no_emit
+                    d_emit = d_alpha[b,t,u] * (exp_emit / norm)
+                    d_no_emit = d_alpha[b,t,u] * (exp_no_emit / norm)
+
+                    cuda.atomic.add(d_alpha, (b,t,u-1), d_emit)
+                    cuda.atomic.add(d_alpha, (b,t-1,u), d_no_emit)
+
+                    # print("norm",norm)
+                    # print("no_emit", no_emit[b,t,u])
+                    # print("emit", emit[b,t,u])
+                    # print("d_no_emit", d_no_emit)
+                    # print("d_emit", d_emit)
+                    # print("before no_emit",d_log_probs[b,t-1,u,blank])
+                    cuda.atomic.add(d_log_probs, (b,t,u-1, labels[b,u-1]), d_emit)
+                    cuda.atomic.add(d_log_probs, (b,t-1,u,blank), d_no_emit)
+                    # print("after no_emit",d_log_probs[b,t-1,u,blank])
+                    # print(d_log_probs[b,t-1,u,blank])
+
+                    t -= 1
+                    # unlock u - 1 and lock u
+                    # if u < U[b]:
+                    cuda.atomic.add(lock, (b, u - 1), -1)
+                    cuda.atomic.add(lock, (b, u), 1)
+
+
+
+class ComputeMarginalProb(Function):
+
+    @staticmethod
+    def forward(ctx, log_probs, labels, log_r, T, U, blank, reduction):
+        log_probs = log_probs.detach()
+        B, maxT, maxU, A = log_probs.shape
+
+        alpha = torch.zeros(
+            (B, maxT, maxU), device=log_probs.device, dtype=log_probs.dtype
+        )
+        emit = torch.zeros(
+            (B, maxT, maxU), device=log_probs.device, dtype=log_probs.dtype
+        )
+        no_emit = torch.zeros(
+            (B, maxT, maxU), device=log_probs.device, dtype=log_probs.dtype
+        )
+        lock = torch.zeros(
+            (B, maxU), dtype=torch.int32, device=log_probs.device
+        )
+        log_p_alpha = torch.zeros(
+            (B,maxU), device=log_probs.device, dtype=log_probs.dtype
+        )
+
+        cu_kernel_forward_only[B, maxU](
+            log_probs, labels, alpha, log_p_alpha, log_r, emit, no_emit, T, U, blank, lock
+        )
+
+        cuda.synchronize()
+        # prepare ctx for backward pass
+        d_alpha = torch.zeros(
+            (B, maxT, maxU), device=log_probs.device, dtype=log_probs.dtype
+        )
+        lock = torch.zeros(
+            (B, maxU), dtype=torch.int32, device=log_probs.device
+        )
+        d_log_p_alpha = torch.zeros(
+            (B,maxU), device=log_probs.device, dtype=log_probs.dtype
+        )
+        d_log_probs = torch.zeros_like(log_probs)
+        ctx.save_for_backward(d_log_probs, labels, d_alpha, d_log_p_alpha, emit, no_emit, T, U, lock)
+
+        ctx.shape = log_probs.shape
+        ctx.blank = blank
+
+        return log_p_alpha
+
+    @staticmethod
+    def backward(ctx, d_log_p):
+        B, maxT, maxU, A = ctx.shape
+        blank = ctx.blank
+        d_log_probs, labels, d_alpha, d_log_p_alpha, emit, no_emit, T, U, lock = ctx.saved_tensors
+
+        cu_kernel_forward_only_grad[B, maxU](
+            d_log_p, d_log_probs, labels, d_alpha, emit, no_emit, T, U, blank, lock
+        )
+        cuda.synchronize()
+        # return gradient w.r.t. log_probs and not to others
+        return d_log_probs, None, None, None, None, None, None, None, None, None, None
 def gfn_loss(
     logits,
     targets,
@@ -610,15 +655,17 @@ def gfn_loss(
     )
     B = log_p.shape[0]
 
+    m = 0
+
+
     loss_batch = torch.zeros((B,))
     for b in range(B):
-        for m in range(0,target_lens[b]-1):
-            for n in range(m+1,target_lens[b]):
+        # full trajectory
+        n = log_r.shape[-1] - 1
 
-                # R_m + P_n
-                sub_tb_loss = (log_r[b, m] - log_r[b, n]) + 2 * (log_p[b,n] - log_p[b,m])
+        # R_m + P_n
+        sub_tb_loss = (log_r[b, m] - log_r[b, n]) + 2 * (log_p[b,n] - log_p[b,m])
 
-                loss_batch[b] = loss_batch[b] + (sub_tb_loss ** 2) # add squared loss
-    breakpoint()
+        loss_batch[b] = loss_batch[b] + (sub_tb_loss ** 2) # add squared loss
 
     return loss_batch.mean()

@@ -11,7 +11,7 @@
 
 seed: 7775
 __set_seed: !apply:speechbrain.utils.seed_everything [!ref <seed>]
-output_folder: !ref results/hyperconformer_8M/<seed>
+output_folder: !ref results/mwer/<seed>
 output_wer_folder: !ref <output_folder>/
 save_folder: !ref <output_folder>/save
 train_log: !ref <output_folder>/train_log.txt
@@ -131,7 +131,9 @@ eos_index: 2
 # Decoding parameters
 min_decode_ratio: 0.0
 max_decode_ratio: 1.0
-valid_search_interval: 10
+valid_search_interval: 100
+train_beam_size: 4
+train_beam_top_k: 4
 valid_beam_size: 10
 test_beam_size: 66
 lm_weight: 0.60
@@ -229,6 +231,19 @@ scorer_test_search: !new:speechbrain.decoders.scorer.ScorerBuilder
     weights:
         ctc: !ref <ctc_weight_decode>
         transformerlm: !ref <lm_weight>
+
+train_search: !new:speechbrain.decoders.S2STransformerBeamSearcher
+    modules: [!ref <Transformer>, !ref <seq_lin>]
+    bos_index: !ref <bos_index>
+    eos_index: !ref <eos_index>
+    min_decode_ratio: !ref <min_decode_ratio>
+    max_decode_ratio: !ref <max_decode_ratio>
+    beam_size: !ref <train_beam_size>
+    using_eos_threshold: False
+    length_normalization: True
+    topk: !ref <train_beam_top_k>
+    return_topk: true
+
 
 valid_search: !new:speechbrain.decoders.S2STransformerBeamSearcher
     modules: [!ref <Transformer>, !ref <seq_lin>]

@@ -6,7 +6,10 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "editdistance>=0.8.1",
+    "kenlm>=0.3.0",
     "numba>=0.61.2",
+    "pygtrie>=2.5.0",
     "soundfile>=0.13.1",
     "speechbrain>=1.0.3",
+    "transformers>=4.54.0",
 ]

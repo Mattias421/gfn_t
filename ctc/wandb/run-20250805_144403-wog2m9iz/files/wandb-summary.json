@@ -1,1 +1,0 @@
-{"valid":{"CER":6.743524369064775,"WER":32.09329790374963,"loss":-2.8211810408995994},"Epoch":1,"_runtime":438,"optimizer_step":48,"lr_model":0.9,"_wandb":{"runtime":438},"_step":48,"train":{"loss_step":-1.8249314152259235,"loss":2.2861414508562055},"_timestamp":1.754405480473769e+09,"lr_wav2vec":0.0001}

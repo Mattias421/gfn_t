@@ -1,1 +1,0 @@
-{"lr_wav2vec":0.0001,"_wandb":{"runtime":328},"_runtime":328,"lr_model":0.9,"_timestamp":1.7544065755612135e+09,"optimizer_step":48,"_step":48,"valid":{"loss":-0.42422669677382047,"CER":49.87436721723386,"WER":139.49414427713808},"Epoch":1,"train":{"loss":2.458076052541164,"loss_step":-0.36706529141322436}}

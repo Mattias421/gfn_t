@@ -1,0 +1,66 @@
+{
+  "os":  "Linux-5.15.0-122-generic-x86_64-with-glibc2.35",
+  "python":  "CPython 3.10.17",
+  "startedAt":  "2025-08-04T14:53:08.539512Z",
+  "args":  [
+    "hparams/focal_sampling.yaml",
+    "--trial_id=mwer_descent_v2",
+    "--sorting=descending"
+  ],
+  "program":  "/exp/exp4/acq22mc/gfn_t/ctc/train_rl.py",
+  "codePath":  "ctc/train_rl.py",
+  "codePathLocal":  "train_rl.py",
+  "git":  {
+    "remote":  "git@github.com:Mattias421/gfn_t.git",
+    "commit":  "c8afc96f004d5a4e41b52fa09f3433113b49dd8d"
+  },
+  "email":  "mcross2@sheffield.ac.uk",
+  "root":  "/exp/exp4/acq22mc/gfn_t/ctc",
+  "host":  "mimas",
+  "executable":  "/exp/exp4/acq22mc/gfn_t/.venv/bin/python3",
+  "cpu_count":  16,
+  "cpu_count_logical":  32,
+  "gpu":  "NVIDIA RTX A4500",
+  "gpu_count":  4,
+  "disk":  {
+    "/":  {
+      "total":  "94609956864",
+      "used":  "89477300224"
+    }
+  },
+  "memory":  {
+    "total":  "135023853568"
+  },
+  "gpu_nvidia":  [
+    {
+      "name":  "NVIDIA RTX A4500",
+      "memoryTotal":  "21464350720",
+      "cudaCores":  7168,
+      "architecture":  "Ampere",
+      "uuid":  "GPU-63963975-35aa-02ff-68e5-47c272688a3f"
+    },
+    {
+      "name":  "NVIDIA RTX A4500",
+      "memoryTotal":  "21464350720",
+      "cudaCores":  7168,
+      "architecture":  "Ampere",
+      "uuid":  "GPU-c45d8073-5ed6-b7d6-a4b1-204ca203066f"
+    },
+    {
+      "name":  "NVIDIA RTX A4500",
+      "memoryTotal":  "21464350720",
+      "cudaCores":  7168,
+      "architecture":  "Ampere",
+      "uuid":  "GPU-262a2fb1-9fb6-9821-ae55-b486f4b444df"
+    },
+    {
+      "name":  "NVIDIA RTX A4500",
+      "memoryTotal":  "21464350720",
+      "cudaCores":  7168,
+      "architecture":  "Ampere",
+      "uuid":  "GPU-fd6c612c-ac9d-0e60-4ddc-d056b8468951"
+    }
+  ],
+  "cudaVersion":  "12.2",
+  "writerId":  "d11yhqbzas9j7izpocwdky51giq1g0d9"
+}

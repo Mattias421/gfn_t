@@ -1,0 +1,1 @@
+{"_wandb":{"runtime":1981},"_runtime":1981,"train":{"loss_step":13.029502127339343},"optimizer_step":461,"_timestamp":1.7543114221061769e+09,"_step":461,"Epoch loaded":1,"test":{"WER":39.071059038344494,"loss":2.3369344887606363,"CER":11.197385713778283}}

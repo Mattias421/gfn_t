@@ -17,7 +17,8 @@
 # Seed needs to be set at top of yaml, before objects with parameters are made
 seed: 1111
 __set_seed: !apply:speechbrain.utils.seed_everything [!ref <seed>]
-output_folder: !ref results/wav2vec2_focal_sample/<seed>
+trial_id: rl_method
+output_folder: !ref results/<trial_id>/<seed>
 output_wer_folder: !ref <output_folder>/
 save_folder: !ref <output_folder>/save
 train_log: !ref <output_folder>/train_log.txt
@@ -30,18 +31,20 @@ wav2vec2_folder: !ref <save_folder>/wav2vec2_checkpoint
 data_folder: /store/store4/data/LibriSpeech/
 # noise/ris dataset will automatically be downloaded
 # data_folder_rirs: !ref <data_folder>
-train_splits: ["train-clean-100"]
-dev_splits: ["dev-clean", "dev-other"]
-test_splits: ["test-clean", "test-other"]
+train_splits: ["finetuning-1h"] #, "finetuning-9h"]
+dev_splits: ["finetuning-1h"]
+test_splits: ["finetuning-1h"]
 skip_prep: False
 ckpt_interval_minutes: 25 # save checkpoint every N min
 train_csv: !ref <output_folder>/train.csv
-valid_csv: !ref <output_folder>/dev-clean.csv
+valid_csv: !ref <output_folder>/finetuning-1h.csv
+# valid_csv: !ref <output_folder>/dev-clean.csv
 test_csv:
-   - !ref <output_folder>/test-clean.csv
-   - !ref <output_folder>/test-other.csv
-   - !ref <output_folder>/dev-clean.csv
-   - !ref <output_folder>/dev-other.csv
+   - !ref <output_folder>/finetuning-1h.csv
+   # - !ref <output_folder>/test-clean.csv
+   # - !ref <output_folder>/test-other.csv
+   # - !ref <output_folder>/dev-clean.csv
+   # - !ref <output_folder>/dev-other.csv
 
 # For k2 CTC training
 seed_steps: 100
@@ -50,9 +53,10 @@ vocab_file: !ref <data_folder>/librispeech-vocab.txt
 sil_prob: 0.
 add_word_boundary: True
 # For k2 decoding
-train_search_beam: 4
+intersect_reference: False
+train_search_beam: 32
 # Beam size (for decoding)
-train_output_beam: 4
+train_output_beam: 8
 
 test_search_beam: 32
 test_output_beam: 8
@@ -218,6 +222,8 @@ ctc_cost: !name:speechbrain.k2_integration.losses.ctc_k2
    reduction: mean
    beam_size: 10
 
+mwa_loss: !name:src.mwa_loss.mwa_loss
+
 modules:
    wav2vec2: !ref <wav2vec2>
    enc: !ref <enc>
@@ -255,8 +261,10 @@ checkpointer: !new:speechbrain.utils.checkpoints.Checkpointer
       scheduler_wav2vec: !ref <lr_annealing_wav2vec>
       counter: !ref <epoch_counter>
 
-train_logger: !new:speechbrain.utils.train_logger.FileTrainLogger
-   save_file: !ref <train_log>
+train_logger: !new:speechbrain.utils.train_logger.WandBLogger
+    initializer: !name:wandb.init
+    project: reward_asr
+    name: !ref <trial_id>
 
 error_rate_computer: !name:speechbrain.utils.metric_stats.ErrorRateStats
 

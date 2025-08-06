@@ -1,0 +1,75 @@
+_wandb:
+    value:
+        cli_version: 0.21.0
+        e:
+            sihbi87l6u9k3sg0qowb40zuvo4l2gtr:
+                args:
+                    - hparams/focal_sampling.yaml
+                    - --trial_id=mwer_10H
+                codePath: ctc/train_rl.py
+                codePathLocal: train_rl.py
+                cpu_count: 16
+                cpu_count_logical: 32
+                cudaVersion: "12.2"
+                disk:
+                    /:
+                        total: "94609956864"
+                        used: "89476964352"
+                email: mcross2@sheffield.ac.uk
+                executable: /exp/exp4/acq22mc/gfn_t/.venv/bin/python3
+                git:
+                    commit: c8afc96f004d5a4e41b52fa09f3433113b49dd8d
+                    remote: git@github.com:Mattias421/gfn_t.git
+                gpu: NVIDIA RTX A4500
+                gpu_count: 4
+                gpu_nvidia:
+                    - architecture: Ampere
+                      cudaCores: 7168
+                      memoryTotal: "21464350720"
+                      name: NVIDIA RTX A4500
+                      uuid: GPU-63963975-35aa-02ff-68e5-47c272688a3f
+                    - architecture: Ampere
+                      cudaCores: 7168
+                      memoryTotal: "21464350720"
+                      name: NVIDIA RTX A4500
+                      uuid: GPU-c45d8073-5ed6-b7d6-a4b1-204ca203066f
+                    - architecture: Ampere
+                      cudaCores: 7168
+                      memoryTotal: "21464350720"
+                      name: NVIDIA RTX A4500
+                      uuid: GPU-262a2fb1-9fb6-9821-ae55-b486f4b444df
+                    - architecture: Ampere
+                      cudaCores: 7168
+                      memoryTotal: "21464350720"
+                      name: NVIDIA RTX A4500
+                      uuid: GPU-fd6c612c-ac9d-0e60-4ddc-d056b8468951
+                host: mimas
+                memory:
+                    total: "135023853568"
+                os: Linux-5.15.0-122-generic-x86_64-with-glibc2.35
+                program: /exp/exp4/acq22mc/gfn_t/ctc/train_rl.py
+                python: CPython 3.10.17
+                root: /exp/exp4/acq22mc/gfn_t/ctc
+                startedAt: "2025-08-04T11:14:41.593635Z"
+                writerId: sihbi87l6u9k3sg0qowb40zuvo4l2gtr
+        m: []
+        python_version: 3.10.17
+        t:
+            "1":
+                - 1
+                - 11
+                - 49
+                - 53
+            "2":
+                - 1
+                - 11
+                - 49
+                - 53
+            "3":
+                - 13
+                - 61
+            "4": 3.10.17
+            "5": 0.21.0
+            "6": 4.54.0
+            "12": 0.21.0
+            "13": linux-x86_64

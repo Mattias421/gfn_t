@@ -1,0 +1,1 @@
+{"_timestamp":1.7543167994054089e+09,"_step":461,"test":{"WER":42.44712416311625,"loss":2.531576947180435,"CER":15.026817745888538},"Epoch loaded":1,"_wandb":{"runtime":2551},"_runtime":2551,"train":{"loss_step":0.7225789098926708},"optimizer_step":461}

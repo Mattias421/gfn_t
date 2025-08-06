@@ -119,7 +119,7 @@ class ASR(sb.Brain):
         
         lattice = None
 
-        if self.optimizer_step > self.hparams.seed_steps:
+        if stage == sb.Stage.TRAIN and self.optimizer_step > self.hparams.seed_steps:
             lattice = get_lattice(
                 p_ctc,
                 wav_lens,
@@ -178,8 +178,31 @@ class ASR(sb.Brain):
             )
 
         else:
-            loss = mwer_loss(lattice, self.lexicon.texts_to_word_ids(batch.wrd), num_paths=4, reduction='sum', nbest_scale=1)
-            print(loss)
+            # logger.info(lattice.tokens.unique())
+            ref_word_ids = self.lexicon.texts_to_word_ids(batch.wrd)
+            
+            if self.hparams.intersect_reference:
+                ref_linear = k2.linear_fsa(ref_word_ids, device=self.device)
+                breakpoint()
+                lattice
+
+            loss = self.hparams.mwa_loss(lattice, ref_word_ids, num_paths=8, reduction='mean')
+            # logger.info(loss)
+            # loss_ctc = self.hparams.ctc_cost(
+            #     log_probs=p_ctc,
+            #     input_lens=wav_lens,
+            #     graph_compiler=self.graph_compiler,
+            #     texts=texts,
+            #     is_training=is_training,
+            # )
+
+            loss = -loss #+ loss_ctc * 0.01
+
+
+        # maxentreg
+        # entropy_loss = (p_ctc * p_ctc.exp()).sum(dim=-1).mean()
+        # logger.info(entropy_loss)
+        # loss = loss + entropy_loss
 
         if stage == sb.Stage.TEST or stage == sb.Stage.VALID:
             for k, path in paths.items():
@@ -232,6 +255,9 @@ class ASR(sb.Brain):
                 "error_rate"
             )
 
+            logger.info(f"CER: {stage_stats['CER']}")
+            logger.info(f"WER: {stage_stats['WER']}")
+
         # Perform end-of-iteration things, like annealing, logging, etc.
         if stage == sb.Stage.VALID:
             old_lr_model, new_lr_model = self.hparams.lr_annealing_model(
@@ -248,7 +274,8 @@ class ASR(sb.Brain):
             )
             self.hparams.train_logger.log_stats(
                 stats_meta={
-                    "epoch": epoch,
+                    "optimizer_step":self.optimizer_step,
+                    "Epoch": epoch,
                     "lr_model": old_lr_model,
                     "lr_wav2vec": old_lr_wav2vec,
                 },
@@ -303,6 +330,9 @@ class ASR(sb.Brain):
                 "wav2vec_opt", self.wav2vec_optimizer
             )
             self.checkpointer.add_recoverable("modelopt", self.model_optimizer)
+
+    def on_fit_batch_end(self, batch, outputs, loss, should_step):
+        self.hparams.train_logger.log_stats(stats_meta={"optimizer_step":self.optimizer_step}, train_stats={"loss_step":loss})
 
 
 def dataio_prepare(hparams):
@@ -549,13 +579,13 @@ if __name__ == "__main__":
     )
 
     # Testing
-    for k in test_datasets.keys():  # keys are test_clean, test_other etc
-        wer_dir = os.path.join(hparams["output_wer_folder"], f"metric_{k}")
-        os.makedirs(wer_dir, exist_ok=True)
-        exp = "HLG" if hparams["compose_HL_with_G"] else "HL"
-        asr_brain.hparams.wer_file = os.path.join(wer_dir, f"wer_{exp}")
-        asr_brain.evaluate(
-            test_datasets[k],
-            test_loader_kwargs=hparams["test_dataloader_opts"],
-            min_key="WER",
-        )
+    # for k in test_datasets.keys():  # keys are test_clean, test_other etc
+    #     wer_dir = os.path.join(hparams["output_wer_folder"], f"metric_{k}")
+    #     os.makedirs(wer_dir, exist_ok=True)
+    #     exp = "HLG" if hparams["compose_HL_with_G"] else "HL"
+    #     asr_brain.hparams.wer_file = os.path.join(wer_dir, f"wer_{exp}")
+    #     asr_brain.evaluate(
+    #         test_datasets[k],
+    #         test_loader_kwargs=hparams["test_dataloader_opts"],
+    #         min_key="WER",
+    #     )

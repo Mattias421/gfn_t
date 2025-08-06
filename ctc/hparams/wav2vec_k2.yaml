@@ -17,7 +17,8 @@
 # Seed needs to be set at top of yaml, before objects with parameters are made
 seed: 1111
 __set_seed: !apply:speechbrain.utils.seed_everything [!ref <seed>]
-output_folder: !ref results/train_wav2vec2_char_k2/<seed>
+trial_id: train_wav2vec2_char_k2
+output_folder: !ref results/<trial_id>/<seed>
 output_wer_folder: !ref <output_folder>/
 save_folder: !ref <output_folder>/save
 train_log: !ref <output_folder>/train_log.txt
@@ -53,7 +54,7 @@ test_search_beam: 32
 # Beam size (for decoding)
 test_output_beam: 8
 test_min_active_state: 300
-test_max_active_state: 3000
+test_max_active_state: 1000
 # Acoustic scale (multiplied by the log probs)
 ac_scale: 1.5
 compose_HL_with_G: False
@@ -246,8 +247,10 @@ checkpointer: !new:speechbrain.utils.checkpoints.Checkpointer
       scheduler_wav2vec: !ref <lr_annealing_wav2vec>
       counter: !ref <epoch_counter>
 
-train_logger: !new:speechbrain.utils.train_logger.FileTrainLogger
-   save_file: !ref <train_log>
+train_logger: !new:speechbrain.utils.train_logger.WandbLogger
+    initializer: !name:wandb.init
+    project: reward_asr
+    name: !ref <trial_id>
 
 error_rate_computer: !name:speechbrain.utils.metric_stats.ErrorRateStats
 

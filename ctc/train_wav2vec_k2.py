@@ -242,6 +242,9 @@ class ASR(sb.Brain):
             )
             self.checkpointer.add_recoverable("modelopt", self.model_optimizer)
 
+    def on_fit_batch_end(self, batch, outputs, loss, should_step):
+        self.hparams.train_logger.log_stats(stats_meta={"optimizer_step":self.optimizer_step}, train_stats={"loss_step":loss})
+
 
 def dataio_prepare(hparams):
     """This function prepares the datasets to be used in the brain class.

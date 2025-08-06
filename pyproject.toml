@@ -12,4 +12,5 @@ dependencies = [
     "soundfile>=0.13.1",
     "speechbrain>=1.0.3",
     "transformers>=4.54.0",
+    "wandb>=0.21.0",
 ]

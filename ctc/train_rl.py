@@ -119,7 +119,7 @@ class ASR(sb.Brain):
         
         lattice = None
 
-        if stage == sb.Stage.TRAIN and self.optimizer_step > self.hparams.seed_steps:
+        if stage == sb.Stage.TRAIN and not self.seeding:
             lattice = get_lattice(
                 p_ctc,
                 wav_lens,
@@ -186,7 +186,7 @@ class ASR(sb.Brain):
                 breakpoint()
                 lattice
 
-            loss = self.hparams.mwa_loss(lattice, ref_word_ids, num_paths=8, reduction='mean')
+            loss = self.hparams.mwa_loss(lattice, ref_word_ids, num_paths=self.hparams.focal_sampling_N, reduction='mean', temperature=self.hparams.temperature)
             # logger.info(loss)
             # loss_ctc = self.hparams.ctc_cost(
             #     log_probs=p_ctc,
@@ -570,6 +570,16 @@ if __name__ == "__main__":
         hparams["pretrainer"].load_collected(asr_brain.device)
 
     # Training
+    asr_brain.seeding = True
+    asr_brain.fit(
+        asr_brain.hparams.epoch_counter_seed,
+        valid_data,
+        valid_data,
+        train_loader_kwargs=hparams["train_dataloader_opts"],
+        valid_loader_kwargs=hparams["valid_dataloader_opts"],
+    )
+
+    asr_brain.seeding = False
     asr_brain.fit(
         asr_brain.hparams.epoch_counter,
         train_data,
@@ -579,13 +589,13 @@ if __name__ == "__main__":
     )
 
     # Testing
-    # for k in test_datasets.keys():  # keys are test_clean, test_other etc
-    #     wer_dir = os.path.join(hparams["output_wer_folder"], f"metric_{k}")
-    #     os.makedirs(wer_dir, exist_ok=True)
-    #     exp = "HLG" if hparams["compose_HL_with_G"] else "HL"
-    #     asr_brain.hparams.wer_file = os.path.join(wer_dir, f"wer_{exp}")
-    #     asr_brain.evaluate(
-    #         test_datasets[k],
-    #         test_loader_kwargs=hparams["test_dataloader_opts"],
-    #         min_key="WER",
-    #     )
+    for k in test_datasets.keys():  # keys are test_clean, test_other etc
+        wer_dir = os.path.join(hparams["output_wer_folder"], f"metric_{k}")
+        os.makedirs(wer_dir, exist_ok=True)
+        exp = "HLG" if hparams["compose_HL_with_G"] else "HL"
+        asr_brain.hparams.wer_file = os.path.join(wer_dir, f"wer_{exp}")
+        asr_brain.evaluate(
+            test_datasets[k],
+            test_loader_kwargs=hparams["test_dataloader_opts"],
+            min_key="WER",
+        )

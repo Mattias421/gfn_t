@@ -108,6 +108,8 @@ class MWALoss(torch.nn.Module):
         # Each path has a corresponding wer.
 
         word_acc = tot_scores.to(device)
+        # ref_lengths = torch.tensor([ref.shape[0] for ref in refs], device=word_acc.device)[nbest.shape.row_ids(1)]
+        # word_acc /= ref_lengths
         
         for i, row_id in enumerate(nbest.shape.row_ids(1)):
             word_acc[i] /= refs[row_id].shape[0]

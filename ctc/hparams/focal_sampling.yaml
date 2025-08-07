@@ -31,20 +31,19 @@ wav2vec2_folder: !ref <save_folder>/wav2vec2_checkpoint
 data_folder: /store/store4/data/LibriSpeech/
 # noise/ris dataset will automatically be downloaded
 # data_folder_rirs: !ref <data_folder>
-train_splits: ["finetuning-1h"] #, "finetuning-9h"]
+train_splits: ["finetuning-9h"]
 dev_splits: ["finetuning-1h"]
-test_splits: ["finetuning-1h"]
+test_splits: ["dev-clean", "dev-other", "test-clean", "test-other"]
 skip_prep: False
 ckpt_interval_minutes: 25 # save checkpoint every N min
 train_csv: !ref <output_folder>/train.csv
 valid_csv: !ref <output_folder>/finetuning-1h.csv
 # valid_csv: !ref <output_folder>/dev-clean.csv
 test_csv:
-   - !ref <output_folder>/finetuning-1h.csv
-   # - !ref <output_folder>/test-clean.csv
-   # - !ref <output_folder>/test-other.csv
-   # - !ref <output_folder>/dev-clean.csv
-   # - !ref <output_folder>/dev-other.csv
+   - !ref <output_folder>/test-clean.csv
+   - !ref <output_folder>/test-other.csv
+   - !ref <output_folder>/dev-clean.csv
+   - !ref <output_folder>/dev-other.csv
 
 # For k2 CTC training
 seed_steps: 100
@@ -100,9 +99,10 @@ G_rescoring_arpa: 4-gram_sb.arpa
 # reinforcement learning
 focal_sampling_gamma: 1
 focal_sampling_N: 4
+temperature: 1
 
 # Training parameters
-number_of_epochs: 1
+number_of_epochs: 1 
 lr: 0.9
 lr_wav2vec: 0.0001
 sorting: ascending  # only ascending and descending are supported currently
@@ -142,6 +142,8 @@ output_neurons: 30  # BPE size, index(blank/eos/bos) = 0
 # Functions and classes
 #
 epoch_counter: !new:speechbrain.utils.epoch_loop.EpochCounter
+   limit: !ref <number_of_epochs>
+epoch_counter_seed: !new:speechbrain.utils.epoch_loop.EpochCounter
    limit: !ref <number_of_epochs>
 
 speed_perturb: !new:speechbrain.augment.time_domain.SpeedPerturb
@@ -260,6 +262,7 @@ checkpointer: !new:speechbrain.utils.checkpoints.Checkpointer
       scheduler_model: !ref <lr_annealing_model>
       scheduler_wav2vec: !ref <lr_annealing_wav2vec>
       counter: !ref <epoch_counter>
+      couter_seed: !ref <epoch_counter_seed>
 
 train_logger: !new:speechbrain.utils.train_logger.WandBLogger
     initializer: !name:wandb.init

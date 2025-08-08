@@ -52,7 +52,6 @@ vocab_file: !ref <data_folder>/librispeech-vocab.txt
 sil_prob: 0.
 add_word_boundary: True
 # For k2 decoding
-intersect_reference: False
 train_search_beam: 32
 # Beam size (for decoding)
 train_output_beam: 8
@@ -98,7 +97,7 @@ G_rescoring_arpa: 4-gram_sb.arpa
 
 # reinforcement learning
 focal_sampling_gamma: 1
-focal_sampling_N: 4
+focal_sampling_N: 16
 temperature: 1
 
 # Training parameters

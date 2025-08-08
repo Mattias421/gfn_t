@@ -112,7 +112,8 @@ class MWALoss(torch.nn.Module):
         # word_acc /= ref_lengths
         
         for i, row_id in enumerate(nbest.shape.row_ids(1)):
-            word_acc[i] /= refs[row_id].shape[0]
+            word_acc[i] -= 1 # remove terminal score
+            word_acc[i] /= (refs[row_id].shape[0] - 1)
 
         # Group each log_prob into [path][arc]
         ragged_nbest_logp = k2.RaggedTensor(path_arc_shape, nbest.fsa.scores)

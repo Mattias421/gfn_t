@@ -116,20 +116,46 @@ class ASR(sb.Brain):
             )
 
         p_ctc = self.hparams.log_softmax(logits)
+
+        # Sort batch to be descending by length of wav files, which is required
+        # by `k2.intersect_dense` called in `k2.ctc_loss`
+        indices = torch.argsort(wav_lens, descending=True)
+        p_ctc = p_ctc[indices]
+        wav_lens = wav_lens[indices]
+        ref_texts = [batch.wrd[i] for i in indices]
         
         lattice = None
 
         if stage == sb.Stage.TRAIN and not self.seeding:
-            lattice = get_lattice(
-                p_ctc,
-                wav_lens,
-                self.decoder["decoding_graph"],
-                search_beam=self.hparams.train_search_beam,
-                output_beam=self.hparams.train_output_beam,
-                ac_scale=self.hparams.ac_scale,
-                max_active_states=self.hparams.test_max_active_state,
-                min_active_states=self.hparams.test_min_active_state,
+            decoding_graph, target_lens = self.graph_compiler.compile(ref_texts, is_training=True)
+
+            input_lens = (wav_lens * p_ctc.shape[1]).round().int()
+
+            batch_size = p_ctc.shape[0]
+
+            supervision_segments = torch.tensor(
+                [[i, 0, input_lens[i]] for i in range(batch_size)],
+                device="cpu",
+                dtype=torch.int32,
             )
+            dense_fsa_vec = k2.DenseFsaVec(p_ctc, supervision_segments)
+
+            lattice = k2.autograd.intersect_dense(
+                a_fsas=decoding_graph,
+                b_fsas=dense_fsa_vec,
+                output_beam=10,
+                frame_idx_name=None,
+            )
+            # lattice = get_lattice(
+            #     p_ctc,
+            #     wav_lens,
+            #     self.decoder["decoding_graph"],
+            #     search_beam=self.hparams.train_search_beam,
+            #     output_beam=self.hparams.train_output_beam,
+            #     ac_scale=self.hparams.ac_scale,
+            #     max_active_states=self.hparams.test_max_active_state,
+            #     min_active_states=self.hparams.test_min_active_state,
+            # )
 
         paths = None
         if stage == sb.Stage.VALID or stage == sb.Stage.TEST:
@@ -151,20 +177,12 @@ class ASR(sb.Brain):
             # user defined decoding for test
             paths = self.decoder["decoding_method"](lattice)
 
-        return p_ctc, wav_lens, paths, lattice
+        return p_ctc, wav_lens, paths, lattice, ref_texts
 
     def compute_objectives(self, predictions, batch, stage):
         """Computes the loss (CTC+NLL) given predictions and targets."""
 
-        p_ctc, wav_lens, paths, lattice = predictions
-
-        # Sort batch to be descending by length of wav files, which is required
-        # by `k2.intersect_dense` called in `k2.ctc_loss`
-        indices = torch.argsort(wav_lens, descending=True)
-        p_ctc = p_ctc[indices]
-        wav_lens = wav_lens[indices]
-        texts = [batch.wrd[i] for i in indices]
-
+        p_ctc, wav_lens, paths, lattice, ref_texts = predictions
 
         is_training = stage == sb.Stage.TRAIN
 
@@ -173,19 +191,14 @@ class ASR(sb.Brain):
                 log_probs=p_ctc,
                 input_lens=wav_lens,
                 graph_compiler=self.graph_compiler,
-                texts=texts,
+                texts=ref_texts,
                 is_training=is_training,
             )
 
         else:
             # logger.info(lattice.tokens.unique())
-            ref_word_ids = self.lexicon.texts_to_word_ids(batch.wrd)
+            ref_word_ids = self.lexicon.texts_to_word_ids(ref_texts)
             
-            if self.hparams.intersect_reference:
-                ref_linear = k2.linear_fsa(ref_word_ids, device=self.device)
-                breakpoint()
-                lattice
-
             loss = self.hparams.mwa_loss(lattice, ref_word_ids, num_paths=self.hparams.focal_sampling_N, reduction='mean', temperature=self.hparams.temperature)
             # logger.info(loss)
             # loss_ctc = self.hparams.ctc_cost(
@@ -211,7 +224,7 @@ class ASR(sb.Brain):
                 )
 
                 predicted_words = [wrd.split(" ") for wrd in predicted_texts]
-                target_words = [wrd.split(" ") for wrd in batch.wrd]
+                target_words = [wrd.split(" ") for wrd in ref_texts]
                 self.wer_metrics[k].append(
                     batch.id, predicted_words, target_words
                 )

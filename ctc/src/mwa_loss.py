@@ -113,7 +113,7 @@ class MWALoss(torch.nn.Module):
         
         for i, row_id in enumerate(nbest.shape.row_ids(1)):
             word_acc[i] -= 1 # remove terminal score
-            word_acc[i] /= (refs[row_id].shape[0] - 1)
+            word_acc[i] /= (refs[row_id].shape[0] - 2)
 
         # Group each log_prob into [path][arc]
         ragged_nbest_logp = k2.RaggedTensor(path_arc_shape, nbest.fsa.scores)
@@ -124,15 +124,15 @@ class MWALoss(torch.nn.Module):
         ragged_path_logp = k2.RaggedTensor(stream_path_shape, path_logp)
         prob_normalized = ragged_path_logp.normalize(use_log=True).values.exp()
 
-        prob_normalized = prob_normalized * word_acc
+        prob_normalized_loss = prob_normalized * word_acc
 
         if self.reduction == 'sum':
-            loss = prob_normalized.sum()
+            loss = prob_normalized_loss.sum()
         elif self.reduction == 'mean':
-            loss = prob_normalized.mean()
+            loss = prob_normalized_loss.mean()
         else:
-            loss = k2.RaggedTensor(stream_path_shape, prob_normalized)
-        return loss
+            loss = k2.RaggedTensor(stream_path_shape, prob_normalized_loss)
+        return loss, prob_normalized.mean(), word_acc.mean()
 
 
 def mwa_loss(lattice,
@@ -188,3 +188,58 @@ def mwa_loss(lattice,
     assert reduction in ('none', 'mean', 'sum'), reduction
     m = MWALoss(temperature, use_double_scores, reduction)
     return m(lattice, ref_texts, nbest_scale, num_paths)
+
+
+
+def reward_loss(log_probs, lattice, ref_texts, num_paths, wav_lens):
+    input_lens = (wav_lens * log_probs.shape[1]).round().int()
+
+    batch_size = log_probs.shape[0]
+
+    supervision_segments = torch.tensor(
+        [[i, 0, input_lens[i]] for i in range(batch_size)],
+        device="cpu",
+        dtype=torch.int32,
+    )
+
+    dense_fsa_vec = k2.DenseFsaVec(log_probs, supervision_segments)
+
+    nbest = k2.Nbest.from_lattice(
+        lattice=lattice,
+        num_paths=num_paths,
+        use_double_scores=True,
+        nbest_scale=1,
+    )
+
+    nbest.fsa.scores *= 0
+
+    print(nbest.fsa.shape)
+    if nbest.fsa.shape[0] == 0:
+        breakpoint()
+    intersection = k2.autograd.intersect_dense(a_fsas=nbest.fsa, b_fsas=dense_fsa_vec, output_beam=10, a_to_b_map=nbest.shape.row_ids(1))
+
+    tot_scores = intersection.get_tot_scores(log_semiring=True, use_double_scores=True)
+    sentence_log_probs = - tot_scores
+
+    hyps = nbest.build_levenshtein_graphs()
+    refs = k2.levenshtein_graph(ref_texts, device=hyps.device)
+    levenshtein_alignment = k2.levenshtein_alignment(
+        refs=refs,
+        hyps=hyps,
+        hyp_to_ref_map=nbest.shape.row_ids(1),
+        sorted_match_ref=True,
+    )
+
+    # tot_scores is a torch.Tensor with shape [tot_num_paths in this batch]
+    tot_scores = levenshtein_alignment.get_tot_scores(
+        use_double_scores=True, log_semiring=False
+    )
+    # Each path has a corresponding wer.
+
+    word_error = - tot_scores.to(log_probs.device)
+
+    loss = word_error * sentence_log_probs
+    loss /= nbest.shape[0]
+
+    return loss.mean(), sentence_log_probs.mean(), word_error.mean()
+

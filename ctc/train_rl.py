@@ -38,44 +38,6 @@ from speechbrain.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-def get_lattice(
-    log_probs_nnet_output: torch.Tensor,
-    input_lens: torch.Tensor,
-    decoder,
-    search_beam: int = 5,
-    output_beam: int = 5,
-    min_active_states: int = 300,
-    max_active_states: int = 1000,
-    ac_scale: float = 1.0,
-    subsampling_factor: int = 1,
-) :
-
-    device = log_probs_nnet_output.device
-    input_lens = input_lens.to(device)
-    if decoder.device != device:
-        logger.warn(
-            "Decoding graph (HL or HLG) not loaded on the same device"
-            "  as nnet, this will cause decoding speed degradation"
-        )
-        decoder = decoder.to(device)
-
-    input_lens = (input_lens * log_probs_nnet_output.shape[1]).round().int()
-    # NOTE: low ac_scales may results in very big lattices and OOM errors.
-    log_probs_ac = log_probs_nnet_output * ac_scale
-
-    lattice = k2.get_lattice(
-        log_probs_ac,
-        input_lens,
-        decoder,
-        search_beam=search_beam,
-        output_beam=output_beam,
-        min_active_states=min_active_states,
-        max_active_states=max_active_states,
-        subsampling_factor=subsampling_factor,
-    )
-
-    return lattice
-
 
 # Define training procedure
 class ASR(sb.Brain):
@@ -117,47 +79,27 @@ class ASR(sb.Brain):
 
         p_ctc = self.hparams.log_softmax(logits)
 
-        # Sort batch to be descending by length of wav files, which is required
-        # by `k2.intersect_dense` called in `k2.ctc_loss`
-        indices = torch.argsort(wav_lens, descending=True)
-        p_ctc = p_ctc[indices]
-        wav_lens = wav_lens[indices]
-        ref_texts = [batch.wrd[i] for i in indices]
         
         lattice = None
+        paths = None
 
         if stage == sb.Stage.TRAIN and not self.seeding:
-            decoding_graph, target_lens = self.graph_compiler.compile(ref_texts, is_training=True)
+            from torch.distributions.multinomial import Multinomial
+            probs = p_ctc.repeat((self.hparams.focal_sampling_N, 1, 1)).exp()
+            sampler = Multinomial(1, probs=probs)
+            sample = sampler.sample().argmax(dim=-1)[:, :50]
+            char_fsa = k2.linear_fsa(sample.tolist()).to(self.device)
+            char_fsa = k2.linear_fsa_with_self_loops(char_fsa)
+            comp = k2.compose(self.decoder["decoding_graph"], char_fsa, treat_epsilons_specially=False)
+            # comp = k2.remove_epsilon(comp)
+            # comp = k2.connect(comp)
+            comp = comp.to('cpu')
+            breakpoint()
+# TODO need to do something about inverting then removing epsilons
+# (Pdb) comp = k2.remove_epsilon_self_loops(k2.invert(comp))
+# (Pdb) paths = k2.one_best_decoding(comp)
 
-            input_lens = (wav_lens * p_ctc.shape[1]).round().int()
 
-            batch_size = p_ctc.shape[0]
-
-            supervision_segments = torch.tensor(
-                [[i, 0, input_lens[i]] for i in range(batch_size)],
-                device="cpu",
-                dtype=torch.int32,
-            )
-            dense_fsa_vec = k2.DenseFsaVec(p_ctc, supervision_segments)
-
-            lattice = k2.autograd.intersect_dense(
-                a_fsas=decoding_graph,
-                b_fsas=dense_fsa_vec,
-                output_beam=10,
-                frame_idx_name=None,
-            )
-            # lattice = get_lattice(
-            #     p_ctc,
-            #     wav_lens,
-            #     self.decoder["decoding_graph"],
-            #     search_beam=self.hparams.train_search_beam,
-            #     output_beam=self.hparams.train_output_beam,
-            #     ac_scale=self.hparams.ac_scale,
-            #     max_active_states=self.hparams.test_max_active_state,
-            #     min_active_states=self.hparams.test_min_active_state,
-            # )
-
-        paths = None
         if stage == sb.Stage.VALID or stage == sb.Stage.TEST:
             # Decode token terms to words
             lattice = sbk2.lattice_decoder.get_lattice(
@@ -177,16 +119,23 @@ class ASR(sb.Brain):
             # user defined decoding for test
             paths = self.decoder["decoding_method"](lattice)
 
-        return p_ctc, wav_lens, paths, lattice, ref_texts
+        return p_ctc, wav_lens, paths, lattice
 
     def compute_objectives(self, predictions, batch, stage):
         """Computes the loss (CTC+NLL) given predictions and targets."""
 
-        p_ctc, wav_lens, paths, lattice, ref_texts = predictions
+        p_ctc, wav_lens, paths, lattice = predictions
 
         is_training = stage == sb.Stage.TRAIN
 
         if lattice is None:
+            # Sort batch to be descending by length of wav files, which is required
+            # by `k2.intersect_dense` called in `k2.ctc_loss`
+            indices = torch.argsort(wav_lens, descending=True)
+            p_ctc = p_ctc[indices]
+            wav_lens = wav_lens[indices]
+            ref_texts = [batch.wrd[i] for i in indices]
+
             loss = self.hparams.ctc_cost(
                 log_probs=p_ctc,
                 input_lens=wav_lens,
@@ -195,27 +144,43 @@ class ASR(sb.Brain):
                 is_training=is_training,
             )
 
+            train_stats = {"seed_loss_step":loss}
+            self.hparams.train_logger.log_stats(stats_meta={"optimizer_step":self.optimizer_step}, train_stats=train_stats)
+
         else:
-            # logger.info(lattice.tokens.unique())
-            ref_word_ids = self.lexicon.texts_to_word_ids(ref_texts)
-            
-            loss = self.hparams.mwa_loss(lattice, ref_word_ids, num_paths=self.hparams.focal_sampling_N, reduction='mean', temperature=self.hparams.temperature)
-            # logger.info(loss)
-            # loss_ctc = self.hparams.ctc_cost(
-            #     log_probs=p_ctc,
-            #     input_lens=wav_lens,
-            #     graph_compiler=self.graph_compiler,
-            #     texts=texts,
-            #     is_training=is_training,
-            # )
+            predicted_texts = sbk2.utils.lattice_paths_to_text(
+                paths, self.lexicon.word_table
+            )
 
-            loss = -loss #+ loss_ctc * 0.01
+            # Sort batch to be descending by length of wav files, which is required
+            # by `k2.intersect_dense` called in `k2.ctc_loss`
+            wav_lens = wav_lens.repeat(self.hparams.focal_sampling_N)
+            indices = torch.argsort(wav_lens, descending=True)
+            p_ctc = p_ctc.repeat((self.hparams.focal_sampling_N, 1, 1))[indices]
+            wav_lens = wav_lens[indices]
+            ref_texts = batch.wrd * self.hparams.focal_sampling_N
+            ref_texts = [ref_texts[i] for i in indices]
+            predicted_texts = [predicted_texts[i] for i in indices]
 
+            hyp_log_probs = self.hparams.ctc_cost(log_probs=p_ctc,input_lens=wav_lens, graph_compiler = self.graph_compiler, texts=predicted_texts, is_training=is_training, reduction='none')
 
-        # maxentreg
-        # entropy_loss = (p_ctc * p_ctc.exp()).sum(dim=-1).mean()
-        # logger.info(entropy_loss)
-        # loss = loss + entropy_loss
+            word_errors = torch.zeros((len(predicted_texts),), device=self.device)
+
+            import editdistance
+
+            for i, (hyp, ref) in enumerate(zip(predicted_texts, ref_texts)):
+                ref_id = self.hparams.focal_sampling_N % (i + 1)
+                word_errors[i] = editdistance.eval(hyp.split(' '), ref_texts[ref_id].split(' '))
+
+            loss = (word_errors * hyp_log_probs) / (p_ctc.shape[-1] * wav_lens)
+            loss /= self.hparams.focal_sampling_N
+            loss = loss.mean()
+
+            if is_training:
+                train_stats = {"loss_step":loss,
+                               "probs":hyp_log_probs.mean(),
+                               "word_err":word_errors.mean()}
+                self.hparams.train_logger.log_stats(stats_meta={"optimizer_step":self.optimizer_step}, train_stats=train_stats)
 
         if stage == sb.Stage.TEST or stage == sb.Stage.VALID:
             for k, path in paths.items():
@@ -271,6 +236,11 @@ class ASR(sb.Brain):
             logger.info(f"CER: {stage_stats['CER']}")
             logger.info(f"WER: {stage_stats['WER']}")
 
+        self.checkpointer.save_and_keep_only(
+            meta={"loss": stage_stats["loss"]},
+            min_keys=["loss"],
+        )
+
         # Perform end-of-iteration things, like annealing, logging, etc.
         if stage == sb.Stage.VALID:
             old_lr_model, new_lr_model = self.hparams.lr_annealing_model(
@@ -294,10 +264,6 @@ class ASR(sb.Brain):
                 },
                 train_stats=self.train_stats,
                 valid_stats=stage_stats,
-            )
-            self.checkpointer.save_and_keep_only(
-                meta={"WER": stage_stats["WER"]},
-                min_keys=["WER"],
             )
         elif stage == sb.Stage.TEST:
             self.hparams.train_logger.log_stats(
@@ -344,8 +310,6 @@ class ASR(sb.Brain):
             )
             self.checkpointer.add_recoverable("modelopt", self.model_optimizer)
 
-    def on_fit_batch_end(self, batch, outputs, loss, should_step):
-        self.hparams.train_logger.log_stats(stats_meta={"optimizer_step":self.optimizer_step}, train_stats={"loss_step":loss})
 
 
 def dataio_prepare(hparams):
@@ -583,23 +547,27 @@ if __name__ == "__main__":
         hparams["pretrainer"].load_collected(asr_brain.device)
 
     # Training
-    asr_brain.seeding = True
-    asr_brain.fit(
-        asr_brain.hparams.epoch_counter_seed,
-        valid_data,
-        valid_data,
-        train_loader_kwargs=hparams["train_dataloader_opts"],
-        valid_loader_kwargs=hparams["valid_dataloader_opts"],
-    )
+    if hparams["number_of_epochs_seed"] > 0:
+        logger.info("seeding")
+        asr_brain.seeding = True
+        asr_brain.fit(
+            asr_brain.hparams.epoch_counter_seed,
+            valid_data,
+            None,
+            train_loader_kwargs=hparams["train_dataloader_opts"],
+            valid_loader_kwargs=hparams["valid_dataloader_opts"],
+        )
 
-    asr_brain.seeding = False
-    asr_brain.fit(
-        asr_brain.hparams.epoch_counter,
-        train_data,
-        valid_data,
-        train_loader_kwargs=hparams["train_dataloader_opts"],
-        valid_loader_kwargs=hparams["valid_dataloader_opts"],
-    )
+    if hparams["number_of_epochs_reward"] > 0:
+        logger.info("training with reward")
+        asr_brain.seeding = False
+        asr_brain.fit(
+            asr_brain.hparams.epoch_counter,
+            train_data,
+            None,
+            train_loader_kwargs=hparams["train_dataloader_opts"],
+            valid_loader_kwargs=hparams["valid_dataloader_opts"],
+        )
 
     # Testing
     for k in test_datasets.keys():  # keys are test_clean, test_other etc
@@ -610,5 +578,5 @@ if __name__ == "__main__":
         asr_brain.evaluate(
             test_datasets[k],
             test_loader_kwargs=hparams["test_dataloader_opts"],
-            min_key="WER",
+            min_key="loss",
         )

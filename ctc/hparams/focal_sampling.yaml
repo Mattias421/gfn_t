@@ -25,19 +25,19 @@ train_log: !ref <output_folder>/train_log.txt
 
 # URL for the biggest Fairseq english wav2vec2 model.
 wav2vec2_hub: facebook/wav2vec2-large-960h-lv60-self
-wav2vec2_folder: !ref <save_folder>/wav2vec2_checkpoint
+wav2vec2_folder: !ref pretrained_models/wav2vec2_checkpoint
 
 # Data files
 data_folder: /store/store4/data/LibriSpeech/
 # noise/ris dataset will automatically be downloaded
 # data_folder_rirs: !ref <data_folder>
-train_splits: ["finetuning-9h"]
-dev_splits: ["finetuning-1h"]
+train_splits: ["finetuning-1h", "finetuning-9h"]
+dev_splits: ["finetuning-10m"]
 test_splits: ["dev-clean", "dev-other", "test-clean", "test-other"]
 skip_prep: False
 ckpt_interval_minutes: 25 # save checkpoint every N min
 train_csv: !ref <output_folder>/train.csv
-valid_csv: !ref <output_folder>/finetuning-1h.csv
+valid_csv: !ref <output_folder>/finetuning-10m.csv
 # valid_csv: !ref <output_folder>/dev-clean.csv
 test_csv:
    - !ref <output_folder>/test-clean.csv
@@ -46,7 +46,6 @@ test_csv:
    - !ref <output_folder>/dev-other.csv
 
 # For k2 CTC training
-seed_steps: 100
 lang_dir: !ref <output_folder>/lang
 vocab_file: !ref <data_folder>/librispeech-vocab.txt
 sil_prob: 0.
@@ -61,7 +60,7 @@ test_output_beam: 8
 test_min_active_state: 300
 test_max_active_state: 3000
 # Acoustic scale (multiplied by the log probs)
-ac_scale: 1.5
+ac_scale: 2
 compose_HL_with_G: False
 # 1best or whole-lattice-rescoring
 # decoding_method: whole-lattice-rescoring
@@ -101,10 +100,11 @@ focal_sampling_N: 16
 temperature: 1
 
 # Training parameters
-number_of_epochs: 1 
+number_of_epochs_seed: 1
+number_of_epochs_reward: 1 
 lr: 0.9
 lr_wav2vec: 0.0001
-sorting: ascending  # only ascending and descending are supported currently
+sorting: random  # only ascending and descending are supported currently
 precision: fp32
 sample_rate: 16000
 
@@ -113,7 +113,7 @@ sample_rate: 16000
 # Must be 3 per GPU to fit 32GB of VRAM
 batch_size: 6
 test_batch_size: 1
-num_workers: 8
+num_workers: 1
 
 # Dataloader options
 train_dataloader_opts:
@@ -140,10 +140,11 @@ output_neurons: 30  # BPE size, index(blank/eos/bos) = 0
 #
 # Functions and classes
 #
+
 epoch_counter: !new:speechbrain.utils.epoch_loop.EpochCounter
-   limit: !ref <number_of_epochs>
+   limit: !ref <number_of_epochs_reward>
 epoch_counter_seed: !new:speechbrain.utils.epoch_loop.EpochCounter
-   limit: !ref <number_of_epochs>
+   limit: !ref <number_of_epochs_seed>
 
 speed_perturb: !new:speechbrain.augment.time_domain.SpeedPerturb
    orig_freq: !ref <sample_rate>
@@ -223,7 +224,7 @@ ctc_cost: !name:speechbrain.k2_integration.losses.ctc_k2
    reduction: mean
    beam_size: 10
 
-mwa_loss: !name:src.mwa_loss.mwa_loss
+mwa_loss: !name:src.mwa_loss.reward_loss
 
 modules:
    wav2vec2: !ref <wav2vec2>
